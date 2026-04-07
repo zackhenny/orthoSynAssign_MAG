@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from orthosynassign.lib import calculate_synteny_ratio, get_synteny_engine, get_visualize_engine
+from orthosynassign.lib import calculate_synteny_ratio, get_synteny_engine
 
 
 class TestCalculateSyntenyRatio:
