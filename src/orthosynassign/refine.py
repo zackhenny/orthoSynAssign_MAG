@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Iterator, cast
 from . import AUTHOR, VERSION
 from . import __doc__ as _module_doc
 from ._utils import CustomHelpFormatter, RefineArgs, setup_logging, validate_annotations, validate_orthogroup
-from .lib import prepare_and_init_engine, read_og_table, write_og_table
+from .lib import get_synteny_engine, read_og_table, write_og_table
 
 if TYPE_CHECKING:
     from .lib import Gene, Genome, Orthogroup
@@ -213,7 +213,7 @@ def _generate_sog_results(
     """
     total_ogs = len(orthogroups)
     indices = list(range(total_ogs))
-    engine = prepare_and_init_engine(genomes, orthogroups)
+    engine = get_synteny_engine(genomes, orthogroups)
 
     def worker_func(og_idx: int) -> list[list[tuple[int, int]]]:
         return engine.refine(og_idx=og_idx, window_size=args.window, ratio_threshold=args.threshold)

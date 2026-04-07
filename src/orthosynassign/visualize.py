@@ -10,7 +10,6 @@ import logging
 import sys
 import textwrap
 from collections import Counter
-from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -19,10 +18,10 @@ from pygenomeviz.utils import ColorCycler
 
 from . import AUTHOR, VERSION
 from ._utils import CustomHelpFormatter, VisualizeArgs, setup_logging, validate_annotations, validate_orthogroup
-from .lib import align_sog_dict, get_shared_ogs, read_og_table
+from .lib import get_visualize_engine, read_og_table
 
 if TYPE_CHECKING:
-    from .lib import Gene, Orthogroup
+    from .lib import Gene
 
 _EPILOG = textwrap.dedent(f"""\
 Examples:
@@ -84,9 +83,10 @@ def main(args: VisualizeArgs) -> int:
 
         # Read orthogroups
         logger.info("Reading orthogroup data from: %s", og_file)
-        refined_orthogroups = {og.id: og for og in read_og_table(sog_file, genomes)}
+        sogs = read_og_table(sog_file, genomes)
         # Overwrite the Gene.og attribute with original og ids
-        _ = read_og_table(og_file, genomes)
+        old_ogs = read_og_table(og_file, genomes)
+        sogs_mapper = {og.id: idx for idx, og in enumerate(sogs)}
 
         # Create output directory
         if args.output is None:
@@ -99,15 +99,22 @@ def main(args: VisualizeArgs) -> int:
         ColorCycler.set_cmap("tab20b")
         # Generate figures for each target_sog
         for target_sog in args.sog:
-            if target_sog not in refined_orthogroups:
+            if target_sog not in sogs_mapper:
                 logger.warning("SOG %s not found in orthogroups.", target_sog)
                 continue
 
             logger.debug("Generate figure for %s...", target_sog)
 
-            aligned_data, palette = _prepare_sog_visualization_data(
-                refined_orthogroups[target_sog], window_size=args.window, keep_all_genes=args.keep_all_genes
-            )
+            engine = get_visualize_engine(genomes, old_ogs, sogs)
+
+            aligned_data_idx = engine.get_aligned_og(sogs_mapper[target_sog], args.window, args.keep_all_genes)
+
+            aligned_data = {
+                genomes[genome_idx][focal_gene_idx]: [genomes[genome_idx][gene_idx] if gene_idx else None for gene_idx in genes]
+                for (genome_idx, focal_gene_idx), genes in aligned_data_idx
+            }
+
+            palette = _get_palette(aligned_data)
 
             output_file_path = output_dir / f"{target_sog}.{args.fmt}"
             _render_sog_figure(aligned_data, palette, output_file_path)
@@ -202,26 +209,18 @@ def _parse_arguments(argv=None) -> VisualizeArgs:
     return cast(VisualizeArgs, parser.parse_args(argv))
 
 
-def _prepare_sog_visualization_data(
-    og: Orthogroup, *, window_size: int, keep_all_genes=False
-) -> tuple[dict[Gene, list[Gene]], dict[str, str]]:
-    """Prepares aligned windows and a color palette for a SOG.
+def _get_palette(aligned_data: dict[Gene, list[Gene]]) -> dict[str, str]:
+    """Prepares color palette for a SOG.
 
     Args:
-        og (Orthogroup): The orthogroup to prepare visualization data for.
-        window_size (int): The size of the window around each gene in the SOG.
-        keep_all_genes (bool, optional): Whether to include all genes or only those assigned to an orthogroup. Defaults to False.
+        aligned_data (dict[Gene, list[Gene]]): A tuple containing a dictionary of aligned data of a SOG.
 
     Returns:
-        tuple[dict[Gene, list[Gene]], dict[str, str]]: A tuple containing a dictionary of aligned windows and a color palette for
-        the SOG.
+        dict[str, str]: A color palette for this SOG.
     """
-    og_windows: dict[Gene, list[Gene]] = _get_genes_from_window(og, window=window_size, keep_all_genes=keep_all_genes)
-    aligned_windows: dict[Gene, list[Gene]] = align_sog_dict(og_windows)
-
     # Count OG occurrences to determine coloring
     og_counter = Counter()
-    for win in aligned_windows.values():
+    for win in aligned_data.values():
         for gene in win:
             if gene and gene.og:
                 og_counter[gene.og.id] += 1
@@ -230,44 +229,7 @@ def _prepare_sog_visualization_data(
     ColorCycler.reset_cycle()
     palette = {og_id: ColorCycler() for og_id, count in og_counter.items() if count > 1}
 
-    return aligned_windows, palette
-
-
-def _get_genes_from_window(og: Orthogroup, *, window: int, keep_all_genes=False) -> dict[Gene, list[Gene]]:
-    """Retrieves a dictionary of genes and their corresponding windows from the given orthogroup.
-
-    Args:
-        og (Orthogroup): The orthogroup to retrieve genes from.
-        window (int): The size of the window around each gene in the SOG.
-        keep_all_genes (bool, optional): Whether to include all genes or only those assigned to an orthogroup. Defaults to False.
-
-    Returns:
-        dict[Gene, list[Gene]]: A dictionary where the keys are genes and the values are lists of genes within their respective
-        windows.
-    """
-    og_windows_idx: dict[Gene, list[int]] = {gene: [gene.index, gene.index] for gene in og if gene.index}
-    for gene_A, gene_B in combinations(og, 2):
-        if not gene_A.genome or not gene_B.genome:
-            continue
-        win_A = gene_A.genome.get_window(gene_A, get_shared_ogs(gene_A.genome, gene_B.genome), window_size=window)
-        win_B = gene_B.genome.get_window(gene_B, get_shared_ogs(gene_A.genome, gene_B.genome), window_size=window)
-        for gene, win in zip((gene_A, gene_B), (win_A, win_B)):
-            start, end = og_windows_idx[gene]
-            new_start, new_end = win[0].index, win[-1].index
-            start = new_start if new_start < start else start
-            end = new_end if new_end > end else end
-            og_windows_idx[gene] = [start, end]
-
-    og_windows: dict[Gene, list[Gene]] = {gene: [] for gene in og}
-    for gene, (start, end) in og_windows_idx.items():
-        continuous_slice: list[Gene] = gene.genome[start : end + 1]
-        if keep_all_genes:
-            og_windows[gene] = list(continuous_slice)
-        else:
-            # Filter: Keep if gene has an OG or is the focal gene itself
-            og_windows[gene] = [g for g in continuous_slice if g.og is not None or g == gene.representative]
-
-    return og_windows
+    return palette
 
 
 def _render_sog_figure(aligned_windows: dict[Gene, list[Gene]], palette: dict[str, str], output_path: Path) -> None:

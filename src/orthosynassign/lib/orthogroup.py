@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
-    from .gene import Gene, Genome
+    from .gene import Gene
 
 
 class Orthogroup:
@@ -97,82 +97,3 @@ class Orthogroup:
         if gene not in self._genes:
             gene.og = self
             self._genes.append(gene)
-
-
-def get_shared_ogs(genome_a: Genome, genome_b: Genome) -> set[str]:
-    """Retrieve the set of Orthogroup IDs that are present in both provided genomes.
-
-    This function is used to identify the common orthogroups shared between two genomes, which serves as a basis for comparing
-    their synteny and identifying syntenic orthologous pairs.
-
-    Args:
-        genome_a (Genome): The first genome.
-        genome_b (Genome): The second genome.
-
-    Returns:
-        set[str]: A set of Orthogroup IDs that are common to both genomes.
-    """
-    ogs_a = {g.og.id for g in genome_a if g.og}
-    ogs_b = {g.og.id for g in genome_b if g.og}
-
-    return ogs_a.intersection(ogs_b)
-
-
-def align_sog_dict(sog_dict: dict[Gene, list[Gene]]) -> dict[Gene, list[Gene | None]]:
-    """Aligns the neighborhood lists within the dictionary so that the focal gene (the key) is at the same index in every value.
-
-    The function pads the neighborhoods with 'None' values to ensure that the focal gene is always at the same index across all
-    neighborhoods. This alignment is necessary for further analysis, such as synteny comparison.
-
-    Args:
-        sog_dict (dict[Gene, list[Gene]]): A dictionary where keys are genes and values are lists of neighboring genes.
-
-    Returns:
-        dict[Gene, list[Gene | None]]: A dictionary with the same structure as `sog_dict`, but with padded neighborhoods to align
-        the focal gene at the same index.
-    """
-    gap_char = None
-    if not sog_dict:
-        return {}
-
-    # Calculate the 'pivot' (the max index of the key in its value list)
-    # Store the current index of each key for efficiency
-    offsets = {}
-    max_prefix_len = 0
-
-    for focal_gene, neighborhood in sog_dict.items():
-        try:
-            # Where is the focal gene in its own neighborhood?
-            idx = neighborhood.index(focal_gene)
-        except ValueError:
-            # Fallback if focal_gene isn't in the list
-            idx = 0
-
-        offsets[focal_gene] = idx
-        if idx > max_prefix_len:
-            max_prefix_len = idx
-
-    # Build the aligned dictionary
-    aligned_dict = {}
-
-    # Calculate global max length to equalize the 'tails' later
-    # First pass: calculate how long each list will be after front padding
-    temp_lengths = []
-    for focal_gene, neighborhood in sog_dict.items():
-        front_pad_size = max_prefix_len - offsets[focal_gene]
-        temp_lengths.append(front_pad_size + len(neighborhood))
-
-    max_total_len = max(temp_lengths)
-
-    # Apply padding
-    for focal_gene, neighborhood in sog_dict.items():
-        # Front padding: shifts the focal gene to the 'pivot' column
-        front_pad = [gap_char] * (max_prefix_len - offsets[focal_gene])
-
-        # Back padding: ensures all lists have the same total length
-        current_padded_list = front_pad + list(neighborhood)
-        back_pad = [gap_char] * (max_total_len - len(current_padded_list))
-
-        aligned_dict[focal_gene] = current_padded_list + back_pad
-
-    return aligned_dict
