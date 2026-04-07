@@ -7,6 +7,20 @@ Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added Rust-implemented `VisualizeEngine` and utilize unified logic previously employed in the `SyntenyEngine` for visualization tasks.
+
+- Added the get_window logic for circular genome.
+
+### Changed
+
+- Refactored the `chromosome_type` attribute in the `Genome` class to `is_circular` for improved code clarity and simplified logic.
+
+### Removed
+
+- Python version object-oriented functions/methods for refinement and visualization have been superseded by Rust-implemented engine.
+
 ## [1.1.0] - 2026-04-02
 
 ### Added
