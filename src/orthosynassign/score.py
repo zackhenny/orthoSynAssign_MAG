@@ -18,13 +18,14 @@ import csv
 import logging
 import sys
 import textwrap
-import time
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
 from . import AUTHOR, VERSION
 from ._utils import CustomHelpFormatter, RefineArgs, setup_logging, validate_annotations, validate_orthogroup
-from .lib import BedParser, FlankRecord, build_flank_window, build_training_table, read_hog_table, read_og_table
+from .lib import FlankEngine, read_hog_table, read_og_table
+from .lib.engine import vectorize_genomes
 
 _EPILOG = textwrap.dedent(f"""\
 Examples:
@@ -42,6 +43,9 @@ Written by {AUTHOR}
 """)
 
 _AVAIL_CPUS = 1
+
+# Edge-type integer → string mapping (matches flank.rs encoding).
+_EDGE_TYPE_MAP = {0: "internal", 1: "left_edge", 2: "right_edge", 3: "both_edge"}
 
 
 class ScoreArgs(RefineArgs):
@@ -101,21 +105,61 @@ def main(args: ScoreArgs) -> int:
             og_genomes = {g.genome.name for g in og if g.genome}
             og_sizes[og.id] = len(og_genomes)
 
-        # Build flank records for all genes across all genomes
-        logger.info("Building flank windows (window_n=%d)…", args.window)
-        flank_records: list[FlankRecord] = []
+        # ------------------------------------------------------------------
+        # Vectorise genomic data for the Rust FlankEngine.
+        # ------------------------------------------------------------------
+        logger.info(
+            "Building flank windows and scores with Rust FlankEngine (window_n=%d)…",
+            args.window,
+        )
+
+        # Reuse the OG/seqid vectorisation already computed by the engine module.
+        og_idxs_all, seqid_idxs_all, is_circular_all = vectorize_genomes(genomes, orthogroups)
+
+        # Map HOG ID strings to compact integers so Rust can use integer arrays.
+        all_hog_ids: list[str] = sorted(set(hog_map.values()))
+        hog_id_to_int: dict[str, int] = {hog: i for i, hog in enumerate(all_hog_ids)}
+
+        hog_idxs_all: list[list[int]] = []
+        strand_all: list[list[int]] = []
         for genome in genomes:
-            for gene_idx in range(len(genome._genes)):
-                gene = genome._genes[gene_idx]
-                if gene.og is None:
-                    continue
-                rec = build_flank_window(genome, gene_idx, args.window, hog_map, strand_aware=True)
-                flank_records.append(rec)
+            hog_idxs_all.append(
+                [hog_id_to_int.get(hog_map.get(g.id, ""), -1) for g in genome._genes]
+            )
+            strand_all.append(
+                [1 if g.strand == "+" else (-1 if g.strand == "-" else 0) for g in genome._genes]
+            )
 
-        logger.info("Built %d flank records", len(flank_records))
+        # One parallel Rust call replaces the O(n²) Python loop over build_flank_window.
+        flank_engine = FlankEngine(
+            seqid_idxs_all,
+            hog_idxs_all,
+            og_idxs_all,
+            strand_all,
+            is_circular_all,
+            len(orthogroups),
+        )
+        raw_results = flank_engine.compute_all(window_n=args.window, strand_aware=True)
+        logger.info("Computed flank data for %d genes", len(raw_results))
 
-        # Assemble training table
-        rows = build_training_table(flank_records, sog_assignments, og_sizes, genome_completeness)
+        # ------------------------------------------------------------------
+        # Build training table rows from FlankEngine output.
+        # ------------------------------------------------------------------
+        # Pre-compute global SOG counts once (O(n)) so each row's _is_split
+        # check is O(1) instead of the previous O(n) per gene (overall O(n²)).
+        sog_global_counts: Counter[str] = Counter(sog_assignments.values())
+        has_multiple_assignments = len(sog_assignments) > 1
+
+        rows = _build_rows(
+            raw_results,
+            genomes,
+            all_hog_ids,
+            og_sizes,
+            genome_completeness,
+            sog_assignments,
+            sog_global_counts,
+            has_multiple_assignments,
+        )
 
         # Write CSV
         output_path = Path(args.output)
@@ -138,16 +182,74 @@ def main(args: ScoreArgs) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_rows(
+    raw_results: list[tuple],
+    genomes,
+    all_hog_ids: list[str],
+    og_sizes: dict[str, int],
+    genome_completeness: dict[str, float],
+    sog_assignments: dict[str, str],
+    sog_global_counts: Counter,
+    has_multiple_assignments: bool,
+) -> list[dict]:
+    """Convert FlankEngine.compute_all output into training-table row dicts."""
+    rows: list[dict] = []
+    for genome_idx, gene_idx, flank_sc, _completeness, edge_type_int, left_hog_idxs, right_hog_idxs in raw_results:
+        gene = genomes[genome_idx][gene_idx]
+        genome_name = genomes[genome_idx].name
+        og_id = gene.og.id if gene.og else ""
+
+        # Map integer HOG indices back to HOG ID strings for diagnostic output.
+        left_hog_strs = ";".join(sorted(all_hog_ids[h] for h in left_hog_idxs))
+        right_hog_strs = ";".join(sorted(all_hog_ids[h] for h in right_hog_idxs))
+
+        sog_id = sog_assignments.get(gene.id, "")
+        is_split = int(_is_split_fast(gene.id, sog_assignments, sog_global_counts, has_multiple_assignments))
+
+        rows.append(
+            {
+                "gene_id": gene.id,
+                "genome": genome_name,
+                "og_id": og_id,
+                "og_size": og_sizes.get(og_id, 0),
+                "genome_completeness": genome_completeness.get(genome_name, 1.0),
+                "flank_score": flank_sc,
+                "flank_left_hogs": left_hog_strs,
+                "flank_right_hogs": right_hog_strs,
+                "edge_type": _EDGE_TYPE_MAP.get(edge_type_int, "internal"),
+                "sog_id": sog_id,
+                "is_split": is_split,
+            }
+        )
+    return rows
+
+
+def _is_split_fast(
+    gene_id: str,
+    sog_assignments: dict[str, str],
+    sog_global_counts: Counter,
+    has_multiple_assignments: bool,
+) -> bool:
+    """O(1) split detection using a pre-computed global SOG Counter.
+
+    A gene is flagged as split when no other gene shares its SOG assignment
+    (i.e. the SOG count is exactly 1 — only this gene carries it).
+    """
+    if not has_multiple_assignments or gene_id not in sog_assignments:
+        return False
+    gene_sog = sog_assignments[gene_id]
+    return sog_global_counts.get(gene_sog, 0) == 1
 
 
 def _read_sog_assignments(sog_file: Path) -> dict[str, str]:
     """Read Refined_SOGs.tsv and return a gene_id → sog_id mapping."""
     assignments: dict[str, str] = {}
     with open(sog_file, encoding="utf-8") as fh:
-        header = fh.readline().strip().split("\t")
-        # Columns: SOG_ID, sample1, sample2, ...
+        fh.readline()  # skip header
         for line in fh:
             fields = line.strip("\n").split("\t")
             if not fields[0]:
