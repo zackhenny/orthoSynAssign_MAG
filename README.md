@@ -4,7 +4,56 @@
 [![License](https://img.shields.io/github/license/stajichlab/orthoSynAssign?label=license)](https://github.com/stajichlab/orthoSynAssign/blob/main/LICENSE)
 [![DOI](https://zenodo.org/badge/1140709253.svg)](https://doi.org/10.5281/zenodo.18762979)
 
-# orthoSynAssign
+# orthoSynAssign_MAG
+
+> **⚠️ This is a fork.** This repository (`zackhenny/orthoSynAssign_MAG`) is a fork of the original
+> [stajichlab/orthoSynAssign](https://github.com/stajichlab/orthoSynAssign) project created by
+> **Cheng-Hung Tsai** and **Jason Stajich** at the University of California, Riverside.
+> All credit for the original tool, its design, and its core algorithms belongs to them.
+> Please cite their work (see [Citation](#citation)) if you use this software.
+>
+> The changes made in this fork are described in the [Fork Changes](#fork-changes) section below.
+> For the canonical version of this tool, visit the original repository at
+> <https://github.com/stajichlab/orthoSynAssign>.
+
+## Fork Changes
+
+This fork (`orthoSynAssign_MAG`) extends the original `orthoSynAssign` tool with two sets of
+additions aimed at large-scale and MAG (Metagenome-Assembled Genome) analyses, where fragmented
+contigs and assembly incompleteness make the fixed `-r` heuristic less reliable and raw Python
+throughput a bottleneck.
+
+### 1. Statistical modelling pipeline (`orthosynassign.stats`)
+
+**What was added:** A complete data-driven calibration pipeline that replaces the fixed `-r`
+synteny-ratio heuristic with a logistic regression model trained on interior genes with known
+split status. The pipeline consists of five sequential steps:
+
+1. `orthosynassign-score` – exports a per-gene flank-score training table.
+2. `orthosynassign.stats.permutation` – permutation test confirming that the HOG-neighbourhood
+   signal is non-random.
+3. `orthosynassign.stats.calibrate` – logistic regression calibration; outputs model coefficients
+   and operating thresholds.
+4. `orthosynassign.stats.cv` – stratified k-fold cross-validation with ROC/PR curve diagnostics.
+5. `orthosynassign.stats.mixed_effects` – mixed-effects logistic regression (via R/lme4) that
+   accounts for per-genome random intercepts.
+6. `orthosynassign.stats.apply_model` – scores edge genes and adds `split_probability`,
+   `split_confidence`, and `rescue_flag` columns to the output table.
+
+**Why:** MAG datasets often contain many fragmented, edge-located genes for which the simple
+ratio threshold is too coarse. Replacing it with a calibrated probability model improves
+precision on fragmentary assemblies and provides a principled FPR-controlled operating point.
+
+### 2. Rust `FlankEngine` with Rayon parallelism
+
+**What was added:** The flank-score computation (`build_shared_matrix` and `refine_logic`) was
+migrated from Python to a new Rust module (`src/flank.rs`) that uses
+[Rayon](https://github.com/rayon-rs/rayon) for data-parallel processing. The Python layer now
+calls the compiled Rust extension via PyO3.
+
+**Why:** MAG studies routinely involve hundreds of genomes, making the all-vs-all flank matrix
+computationally expensive in pure Python. The Rust/Rayon implementation reduces wall-clock time
+significantly for large genome sets, making the full calibration pipeline practical at scale.
 
 Ortholog Synteny Assignment Tool - A Python tool to refine orthologous groups using synteny information inferred from genome
 annotation files (BED converted from GFF3/GTF). This is a Python re-implementation of the [OrthoRefine], which is written in C++
@@ -230,13 +279,14 @@ for R installation instructions.
 
 ### From source
 
-Clone through ssh
+To install **this fork** (with the statistical modelling and Rust FlankEngine additions), clone
+from this repository:
 
 ```bash
-git clone git@github.com:stajichlab/orthoSynAssign.git
+git clone https://github.com/zackhenny/orthoSynAssign_MAG.git
 ```
 
-or https
+To install the **original upstream tool** instead, clone from:
 
 ```bash
 git clone https://github.com/stajichlab/orthoSynAssign.git
@@ -245,7 +295,7 @@ git clone https://github.com/stajichlab/orthoSynAssign.git
 Navigate to the project directory and install the package.
 
 ```bash
-cd orthoSynAssign
+cd orthoSynAssign_MAG   # or orthoSynAssign for the upstream version
 pip install .
 ```
 
