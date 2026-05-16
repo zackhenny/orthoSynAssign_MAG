@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 pub fn get_orthogroups_vec(num_orthogroups: usize, ogs: &[Vec<i32>]) -> Vec<Vec<(usize, usize)>> {
@@ -22,20 +23,35 @@ pub fn build_shared_matrix(ogs: &[Vec<i32>]) -> Vec<Vec<Vec<i32>>> {
         .map(|arr| arr.iter().filter(|&&id| id != -1).cloned().collect())
         .collect();
 
+    // Compute the upper triangle (including diagonal) in parallel.
+    // Each entry is (i, j, sorted_intersection).
+    let pairs: Vec<(usize, usize, Vec<i32>)> = (0..num_genomes)
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let genome_sets = &genome_sets;
+            (i..num_genomes).map(move |j| {
+                let mut intersection: Vec<i32> = if i == j {
+                    genome_sets[i].iter().cloned().collect()
+                } else {
+                    genome_sets[i]
+                        .intersection(&genome_sets[j])
+                        .cloned()
+                        .collect()
+                };
+                intersection.sort_unstable();
+                (i, j, intersection)
+            })
+        })
+        .collect();
+
+    // Fill the matrix from the computed pairs.
     let mut matrix = vec![vec![Vec::new(); num_genomes]; num_genomes];
-    for i in 0..num_genomes {
-        for j in i..num_genomes {
-            let mut intersection: Vec<i32> = if i == j {
-                genome_sets[i].iter().cloned().collect()
-            } else {
-                genome_sets[i]
-                    .intersection(&genome_sets[j])
-                    .cloned()
-                    .collect()
-            };
-            intersection.sort_unstable();
-            matrix[i][j] = intersection.clone();
-            matrix[j][i] = intersection;
+    for (i, j, intersection) in pairs {
+        if i == j {
+            matrix[i][j] = intersection;
+        } else {
+            matrix[j][i] = intersection.clone();
+            matrix[i][j] = intersection;
         }
     }
     matrix

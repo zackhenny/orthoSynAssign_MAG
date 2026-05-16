@@ -47,6 +47,19 @@ def get_visualize_engine(genomes: list[Genome], ogs: list[Orthogroup], sogs: lis
     return engine
 
 
+def vectorize_genomes(
+    genomes: list[Genome],
+    orthogroups: list[Orthogroup],
+) -> tuple[list[list[int]], list[list[int]], list[bool]]:
+    """Public wrapper around *_data_vectorization* for use by other modules.
+
+    Returns the same (og_list_all, seqid_list_all, is_circular_all) triple that is
+    passed to the Rust engines, so callers that need per-gene OG/seqid indices can
+    reuse this rather than re-implementing the mapping.
+    """
+    return _data_vectorization(genomes, orthogroups)
+
+
 def _data_vectorization(
     genomes: list[Genome], orthogroups: list[Orthogroup]
 ) -> tuple[list[list[int]], list[list[int]], list[bool]]:

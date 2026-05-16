@@ -1,5 +1,6 @@
 use crate::utils::*;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 #[pyclass]
@@ -77,32 +78,30 @@ impl SyntenyEngine {
             }
         }
 
-        let mut refined_pairs = Vec::new();
+        let num_genomes = genome_indices.len();
 
-        // Deterministic Pairwise Loop
-        for i in 0..genome_indices.len() {
-            for j in i + 1..genome_indices.len() {
+        // Build all (i, j) pairs where i < j.
+        let all_pairs: Vec<(usize, usize)> = (0..num_genomes)
+            .flat_map(|i| (i + 1..num_genomes).map(move |j| (i, j)))
+            .collect();
+
+        // Process pairs in parallel using Rayon.
+        let mut refined_pairs: Vec<((usize, usize), (usize, usize))> = all_pairs
+            .into_par_iter()
+            .flat_map_iter(|(i, j)| {
                 let idx_a = genome_indices[i];
                 let idx_b = genome_indices[j];
                 let genes_a = &genes_by_genome[&idx_a];
                 let genes_b = &genes_by_genome[&idx_b];
                 let (p_idx, s_idx, p_genes, s_genes) = if genes_a.len() <= genes_b.len() {
-                    (idx_a, idx_b, genes_a, genes_b)
+                    (idx_a, idx_b, genes_a.as_slice(), genes_b.as_slice())
                 } else {
-                    (idx_b, idx_a, genes_b, genes_a)
+                    (idx_b, idx_a, genes_b.as_slice(), genes_a.as_slice())
                 };
 
-                let pairs = self.compare_gene_pairs(
-                    p_idx,
-                    s_idx,
-                    p_genes,
-                    s_genes,
-                    window_size,
-                    ratio_threshold,
-                );
-                refined_pairs.extend(pairs);
-            }
-        }
+                self.compare_gene_pairs(p_idx, s_idx, p_genes, s_genes, window_size, ratio_threshold)
+            })
+            .collect();
 
         // Final Sorting of refined_pairs to ensure DSU input is identical
         refined_pairs.sort_unstable();

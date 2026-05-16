@@ -11,6 +11,7 @@ A low score suggests the gene may be a split artifact or misassigned.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -137,12 +138,16 @@ def build_training_table(
         ``flank_right_hogs``, ``flank_completeness``, ``edge_type``, ``is_split``.
     """
     # Build reference HOG sets per OG (combine all flank records for same OG)
-    from collections import defaultdict
+    from collections import Counter, defaultdict
 
     og_to_ref_sets: dict[str, list[frozenset[str]]] = defaultdict(list)
     for rec in flank_records:
         if rec.og_id:
             og_to_ref_sets[rec.og_id].append(rec.hog_ids_left | rec.hog_ids_right)
+
+    # Pre-compute the global SOG counts once to avoid an O(n²) scan per record.
+    sog_global_counts: Counter[str] = Counter(sog_assignments.values())
+    has_multiple_assignments = len(sog_assignments) > 1
 
     rows: list[dict] = []
     for rec in flank_records:
@@ -155,7 +160,7 @@ def build_training_table(
         score = flank_score(rec.hog_ids_left, rec.hog_ids_right, ref_sets_no_self)
 
         sog_id = sog_assignments.get(rec.gene_id, "")
-        is_split = int(_is_split(rec.gene_id, rec.og_id, sog_assignments))
+        is_split = int(_is_split_fast(rec.gene_id, sog_assignments, sog_global_counts, has_multiple_assignments))
 
         rows.append(
             {
@@ -175,26 +180,41 @@ def build_training_table(
     return rows
 
 
+def _is_split_fast(
+    gene_id: str,
+    sog_assignments: dict[str, str],
+    sog_global_counts: Counter[str],
+    has_multiple_assignments: bool,
+) -> bool:
+    """Return True if this gene ended up in a SOG that doesn't appear in any other assignment.
+
+    Uses a pre-computed Counter to achieve O(1) per-gene lookups instead of
+    iterating over the entire sog_assignments dict for every gene (which was O(n²)).
+
+    A gene is considered "split" when:
+    - There is more than one gene with a SOG assignment, AND
+    - No other gene shares this gene's SOG (i.e. the SOG count is exactly 1).
+    """
+    if not has_multiple_assignments or gene_id not in sog_assignments:
+        return False
+    gene_sog = sog_assignments[gene_id]
+    return sog_global_counts.get(gene_sog, 0) == 1
+
+
 def _is_split(gene_id: str, og_id: str, sog_assignments: dict[str, str]) -> bool:
     """Return True if this gene ended up in a SOG that doesn't represent the majority of its OG.
 
-    A gene is considered "split" (an artifact) when its assigned SOG is a
-    minority cluster — i.e. most other genes in the same OG were grouped into
-    a different SOG.
+    .. deprecated::
+        Use :func:`_is_split_fast` with a pre-computed Counter instead.
+        This implementation has O(n) cost per call, making overall complexity O(n²).
     """
     if not og_id or gene_id not in sog_assignments:
         return False
 
     from collections import Counter
 
-    # Find all genes with the same og_id — not directly available here, so we
-    # use a simpler proxy: a gene is split if its SOG is a singleton among the
-    # assignments for this OG.
-    # Caller should pre-build a richer structure if more precision is needed.
-    # Here we just flag genes whose SOG appears only once across all sog_assignments values.
     gene_sog = sog_assignments[gene_id]
     og_sogs = [v for k, v in sog_assignments.items() if k != gene_id]
     counts = Counter(og_sogs)
-    # If this SOG appears only for this gene, consider it split
     total = sum(counts.values())
     return total > 0 and counts.get(gene_sog, 0) == 0
