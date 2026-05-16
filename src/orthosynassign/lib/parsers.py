@@ -146,22 +146,25 @@ class BedParser(AnnotationParser):
             line (str): The content of the current line, stripped of leading and trailing whitespace.
 
         Raises:
-            ValueError: If the line does not contain exactly 4 fields, indicating an invalid format for a BED
+            ValueError: If the line does not contain 4 or 5 fields, indicating an invalid format for a BED
                 file.
         """
         self._genome: Genome
         fields = line.split("\t")
-        if len(fields) != 4:
-            raise ValueError(f"Line {line_num}: Expected 4 fields, got {len(fields)}")
-        (seqid, start, end, name) = fields
+        if len(fields) not in (4, 5):
+            raise ValueError(f"Line {line_num}: Expected 4 or 5 fields, got {len(fields)}")
+        seqid, start, end, name = fields[:4]
+        strand = fields[4] if len(fields) == 5 else "."
         start, end = int(start), int(end)
         gene = Gene(seqid=seqid, start=start, end=end, gene_id=name)
+        gene.strand = strand
         self._genome.add_gene(gene)
 
         names = name.split(";")
         if len(names) > 1:
             for n in names:
                 g = Gene(seqid=seqid, start=start, end=end, gene_id=n)
+                g.strand = strand
                 g.representative = gene
                 self._genome.add_gene(g, is_isoform=True)
 

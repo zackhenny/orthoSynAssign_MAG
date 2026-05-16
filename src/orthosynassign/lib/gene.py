@@ -19,7 +19,7 @@ class Gene:
         index (int | None): The index of the gene in its genome.
     """
 
-    __slots__ = ("seqid", "start", "len", "id", "genome", "og", "index", "representative")
+    __slots__ = ("seqid", "start", "len", "id", "genome", "og", "index", "representative", "strand")
 
     def __init__(self, seqid: str, start: int, end: int, gene_id: str) -> None:
         """Initialize a new Gene object.
@@ -43,6 +43,7 @@ class Gene:
         self.og: Orthogroup | None = None
         self.index: int | None = None
         self.representative: Gene = self
+        self.strand: str = "."
 
     def __repr__(self) -> str:
         """Return a string representation of the Gene object.

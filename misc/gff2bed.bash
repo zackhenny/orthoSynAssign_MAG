@@ -39,6 +39,7 @@ awk -v entry_id=$entry_id -v gene_entry=$gene_entry -v protein_entry=$protein_en
             # Store the coordinates and scaffold for IDs (especially for genes)
             if ($3 == gene_entry) {
                 gene_coords[id] = $1 "\t" ($4 - 1) "\t" $5
+                gene_strand[id] = $7
             }
             # Map this feature to its parent
             parent_map[id] = parent
@@ -86,7 +87,8 @@ awk -v entry_id=$entry_id -v gene_entry=$gene_entry -v protein_entry=$protein_en
 
         # Output the final BED records
         for (g_id in gene_to_proteins) {
-            print gene_coords[g_id] "\t" gene_to_proteins[g_id]
+            strand = (g_id in gene_strand) ? gene_strand[g_id] : "."
+            print gene_coords[g_id] "\t" gene_to_proteins[g_id] "\t" strand
         }
     }
 ' <(zcat $1) <(zcat $1) | sort -k 1,1 -k2,2n

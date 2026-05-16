@@ -115,11 +115,116 @@ colors; genes with orthologs in other genomes located outside the given window a
 
 <img src= "misc/SOG000039.OG0000040.svg" alt="A refined orthogroup SOG000039" width="800">
 
+## Statistical Modelling
+
+The `orthosynassign-score` command and the `orthosynassign.stats` sub-package
+provide a data-driven calibration pipeline that replaces the fixed `-r` heuristic
+with a logistic regression model trained on interior genes with known split status.
+
+### Recommended Execution Sequence
+
+#### 1. Export the flank-score training table
+
+```bash
+orthosynassign-score \
+    --og_file orthogroups.tsv \
+    --hog_file N0.tsv \
+    --sog_file Refined_SOGs.tsv \
+    --bed *.bed \
+    -w 4 \
+    -o sog_gene_edge_long.csv
+```
+
+This produces `sog_gene_edge_long.csv` with per-gene flank scores and
+ground-truth split labels for interior genes.
+
+#### 2. Permutation test (confirm HOG signal is non-random)
+
+```bash
+python -m orthosynassign.stats.permutation \
+    --table sog_gene_edge_long.csv \
+    --n_permutations 1000 \
+    --output_dir results/
+```
+
+Outputs `permutation_test.png` and `permutation_summary.tsv`.
+Exits with code 1 if the HOG-neighbourhood signal is not significant at α = 0.05.
+
+#### 3. Logistic regression calibration
+
+```bash
+python -m orthosynassign.stats.calibrate \
+    --table sog_gene_edge_long.csv \
+    --output_dir results/
+```
+
+Outputs `calibration.json` (model coefficients and operating thresholds),
+`calibration_roc.png`, and `calibration_pr.png`.
+
+#### 4. Cross-validation / ROC analysis
+
+```bash
+python -m orthosynassign.stats.cv \
+    --table sog_gene_edge_long.csv \
+    --output_dir results/ \
+    --cv_folds 5 \
+    --max_fpr 0.05
+```
+
+Outputs `cv_roc.png`, `cv_pr.png`, and `cv_summary.tsv` with per-fold AUC and
+optimal threshold at the specified FPR.
+
+#### 5. Mixed-effects logistic regression (R / lme4)
+
+```bash
+python -m orthosynassign.stats.mixed_effects \
+    --table sog_gene_edge_long.csv \
+    --output_dir results/
+```
+
+Calls `Rscript` internally.  Outputs `mixed_effects_results.tsv` (fixed-effect
+coefficients), `genome_random_effects.tsv` (per-genome intercepts), and
+`mixed_effects_icc.txt` (intra-class correlation).
+
+#### 6. Score edge genes and flag rescues
+
+```bash
+python -m orthosynassign.stats.apply_model \
+    --table sog_gene_edge_long.csv \
+    --calibration results/calibration.json \
+    --output sog_gene_edge_scored.csv \
+    --threshold_type f1
+```
+
+Adds `split_probability`, `split_confidence`, and `rescue_flag` columns to the
+edge-gene table.
+
 ## Requirements
 
 - [Python] >= 3.9, < 3.14
 - [numpy] >= 2.0.0
 - [pyGenomeViz] >= 1.6.0
+
+### Statistical Modelling (optional)
+
+The `[stats]` extra installs the Python dependencies for the calibration and
+evaluation pipeline:
+
+```bash
+pip install 'orthosynassign[stats]'
+```
+
+This adds: `scipy`, `scikit-learn`, `numpy`, `matplotlib`, `pandas`.
+
+The mixed-effects logistic regression (Step 4) additionally requires **R** (≥ 4.0)
+and the `lme4` package:
+
+```r
+install.packages("lme4")
+```
+
+`Rscript` must be available on your `PATH`.  See [CRAN](https://cran.r-project.org/)
+for R installation instructions.
 
 ## Install
 

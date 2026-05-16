@@ -53,13 +53,38 @@ class TestBedParser:
 
     def test_parser_invalid_format(self, tmp_path):
         """Verify that incorrect number of fields raises ValueError."""
-        bad_content = "chr1\t100\t200\tGeneA\tExtraField\n"
+        bad_content = "chr1\t100\t200\n"
         bed_file = tmp_path / "invalid.bed"
         bed_file.write_text(bad_content)
 
         parser = BedParser(bed_file)
-        with pytest.raises(ValueError, match="Expected 4 fields"):
+        with pytest.raises(ValueError, match="Expected 4 or 5 fields"):
             parser.parse()
+
+    def test_parse_five_column_bed(self, tmp_path):
+        """Verify that 5-column BED files are parsed and strand is captured."""
+        content = "chr1\t100\t200\tGeneA\t+\nchr1\t300\t400\tGeneB\t-\nchr2\t500\t600\tGeneC\t.\n"
+        bed_file = tmp_path / "strand.bed"
+        bed_file.write_text(content)
+
+        parser = BedParser(bed_file)
+        genome = parser.parse()
+
+        assert len(genome) == 3
+        assert genome[0].strand == "+"
+        assert genome[1].strand == "-"
+        assert genome[2].strand == "."
+
+    def test_parse_four_column_strand_defaults_to_dot(self, tmp_path):
+        """Verify that 4-column BED files set strand to '.' by default."""
+        content = "chr1\t100\t200\tGeneA\n"
+        bed_file = tmp_path / "nostrand.bed"
+        bed_file.write_text(content)
+
+        parser = BedParser(bed_file)
+        genome = parser.parse()
+
+        assert genome[0].strand == "."
 
     def test_parse_exception_resets_genome(self, tmp_path):
         """Verify that if parsing fails, the internal _genome is reset to None."""
