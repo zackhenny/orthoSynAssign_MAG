@@ -120,7 +120,7 @@ pub fn get_window<F>(
     }
 }
 
-pub fn calculate_synteny_ratio(win_a: &[i32], win_b: &[i32]) -> f64 {
+pub fn calculate_synteny_ratio(win_a: &[i32], win_b: &[i32], edge_adjusted: bool) -> f64 {
     let len_a = win_a.len();
     let len_b = win_b.len();
 
@@ -144,7 +144,116 @@ pub fn calculate_synteny_ratio(win_a: &[i32], win_b: &[i32]) -> f64 {
         }
     }
 
-    matches as f64 / std::cmp::max(len_a, len_b) as f64
+    // When at least one gene is at a contig edge its window is truncated through
+    // missing data, not absent synteny.  Normalise by the smaller window so the
+    // question becomes "of what IS visible, how much matches?" rather than
+    // penalising the edge gene for the unavailable context.
+    let denom = if edge_adjusted {
+        std::cmp::min(len_a, len_b)
+    } else {
+        std::cmp::max(len_a, len_b)
+    };
+
+    matches as f64 / denom as f64
+}
+
+/// Count the number of genes on the same contig as `gene_idx` within `half_win`
+/// steps on each side, **without** any OG-validity filter.
+///
+/// This mirrors the scan pattern of `get_window_linear` / `get_window_circular`
+/// but counts all same-seqid neighbours regardless of OG assignment.  The
+/// result is compared against `2 * half_win` to determine whether a gene sits
+/// at a contig edge (result < 2 * half_win) and therefore has a structurally
+/// truncated synteny window.
+pub fn count_raw_contig_neighbors(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+    is_circular: bool,
+) -> usize {
+    if half_win == 0 {
+        return 0;
+    }
+    if is_circular {
+        count_raw_contig_neighbors_circular(seqid_vec, gene_idx, half_win)
+    } else {
+        count_raw_contig_neighbors_linear(seqid_vec, gene_idx, half_win)
+    }
+}
+
+fn count_raw_contig_neighbors_linear(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+) -> usize {
+    let focal_seqid = seqid_vec[gene_idx];
+    let n = seqid_vec.len();
+
+    let mut left = 0usize;
+    let mut i = gene_idx;
+    while i > 0 && left < half_win {
+        i -= 1;
+        if seqid_vec[i] == focal_seqid {
+            left += 1;
+        }
+    }
+
+    let mut right = 0usize;
+    let mut j = gene_idx;
+    while j + 1 < n && right < half_win {
+        j += 1;
+        if seqid_vec[j] == focal_seqid {
+            right += 1;
+        }
+    }
+
+    left + right
+}
+
+fn count_raw_contig_neighbors_circular(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+) -> usize {
+    let focal_seqid = seqid_vec[gene_idx];
+    let n = seqid_vec.len();
+    if n == 0 {
+        return 0;
+    }
+    let max_neighbors = n - 1;
+
+    let mut left = 0usize;
+    let mut i = gene_idx;
+    for _ in 0..n {
+        if left >= half_win {
+            break;
+        }
+        i = (i + n - 1) % n;
+        if i == gene_idx {
+            break;
+        }
+        if seqid_vec[i] == focal_seqid {
+            left += 1;
+        }
+    }
+
+    let r_limit = half_win.min(max_neighbors - left);
+    let mut right = 0usize;
+    let mut j = gene_idx;
+    for _ in 0..n {
+        if right >= r_limit {
+            break;
+        }
+        j = (j + 1) % n;
+        if j == gene_idx {
+            break;
+        }
+        if seqid_vec[j] == focal_seqid {
+            right += 1;
+        }
+    }
+
+    left + right
 }
 
 pub fn cluster_genes(
