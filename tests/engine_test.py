@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from orthosynassign.lib import calculate_synteny_ratio, get_synteny_engine
+from orthosynassign.lib import calculate_directional_synteny_ratio, calculate_synteny_ratio, get_synteny_engine, get_window_split
 
 
 class TestCalculateSyntenyRatio:
@@ -194,6 +194,247 @@ class TestSyntenyEngineRefinement:
         )
         sog = result[0]
         sog_genes = [genomes[gi][gene_i] for gi, gene_i in sog]
+        assert g_a_focal in sog_genes
+        assert g_b_focal in sog_genes
+
+
+class TestGetWindowSplit:
+    """Tests for the directional split window function."""
+
+    def test_split_internal_gene(self):
+        """Internal gene returns equal left and right windows."""
+        # seqid = all 0 (same contig), 7 genes total, focal is index 3
+        seqid_vec = [0, 0, 0, 0, 0, 0, 0]
+        og_mask = [True] * 7
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=3, window_size=4, is_circular=False)
+        assert left == [2, 1] or left == sorted(left, reverse=False)
+        # Half window = 2, so 2 left and 2 right
+        assert len(left) == 2
+        assert len(right) == 2
+        assert all(idx < 3 for idx in left)
+        assert all(idx > 3 for idx in right)
+
+    def test_split_left_edge_gene(self):
+        """Gene at left edge of contig has empty left window."""
+        seqid_vec = [0, 0, 0, 0, 0]
+        og_mask = [True] * 5
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=0, window_size=4, is_circular=False)
+        assert left == []
+        assert len(right) == 2
+        assert right[0] == 1
+
+    def test_split_right_edge_gene(self):
+        """Gene at right edge of contig has empty right window."""
+        seqid_vec = [0, 0, 0, 0, 0]
+        og_mask = [True] * 5
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=4, window_size=4, is_circular=False)
+        assert right == []
+        assert len(left) == 2
+        assert left[-1] == 3
+
+    def test_split_near_left_edge(self):
+        """Gene one step from left edge has 1 left and up to 2 right neighbors."""
+        seqid_vec = [0, 0, 0, 0, 0]
+        og_mask = [True] * 5
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=1, window_size=4, is_circular=False)
+        assert left == [0]
+        assert right == [2, 3]
+
+    def test_split_contig_boundary_respected(self):
+        """Genes on different contigs do not bleed into each other."""
+        # Two contigs: [0,0,0] and [1,1,1]
+        seqid_vec = [0, 0, 0, 1, 1, 1]
+        og_mask = [True] * 6
+        # Gene at index 2 (last gene of contig 0)
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=2, window_size=4, is_circular=False)
+        assert 3 not in right and 4 not in right and 5 not in right  # no cross-contig
+        assert right == []  # right edge of its contig
+
+    def test_split_og_mask_filters_neighbors(self):
+        """Only genes passing the OG mask are included."""
+        seqid_vec = [0, 0, 0, 0, 0]
+        og_mask = [False, True, False, True, False]  # only indices 1 and 3 pass
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=2, window_size=4, is_circular=False)
+        assert left == [1]
+        assert right == [3]
+
+    def test_split_ascending_order_preserved(self):
+        """Left indices are in ascending order (smallest first)."""
+        seqid_vec = [0] * 10
+        og_mask = [True] * 10
+        left, right = get_window_split(og_mask, seqid_vec, gene_idx=5, window_size=4, is_circular=False)
+        assert left == sorted(left)
+        assert right == sorted(right)
+
+
+class TestCalculateDirectionalSyntenyRatio:
+    """Tests for the directional synteny ratio function."""
+
+    def test_both_internal_same_as_calculate_synteny_ratio(self):
+        """Both internal: behaviour matches calculate_synteny_ratio (merged, max denom)."""
+        left_a = [1, 2]
+        right_a = [3, 4]
+        left_b = [1, 2]
+        right_b = [3, 4]
+        expected = calculate_synteny_ratio(
+            np.array([1, 2, 3, 4], dtype=np.int32),
+            np.array([1, 2, 3, 4], dtype=np.int32),
+        )
+        result = calculate_directional_synteny_ratio(
+            left_a, right_a, left_b, right_b,
+            False, False, False, False,
+        )
+        assert result == pytest.approx(expected)
+
+    def test_left_edge_a_compares_right_sides_only(self):
+        """A is left-edge only: only right sides are compared."""
+        # A has no left context; right=[3,4] for A, right=[3,4] for B
+        # B has left=[1,2] which should be ignored
+        result = calculate_directional_synteny_ratio(
+            [], [3, 4],          # A: no left, right=[3,4]
+            [1, 2], [3, 4],      # B: left=[1,2] (ignored), right=[3,4]
+            True, False,         # A: left_edge=True, right_edge=False
+            False, False,        # B: internal
+        )
+        # Should match right sides: 2/min(2,2) = 1.0
+        assert result == pytest.approx(1.0)
+
+    def test_right_edge_a_compares_left_sides_only(self):
+        """A is right-edge only: only left sides are compared."""
+        result = calculate_directional_synteny_ratio(
+            [1, 2], [],          # A: left=[1,2], no right
+            [1, 2], [5, 6],      # B: left=[1,2], right=[5,6] (ignored)
+            False, True,         # A: right_edge=True
+            False, False,        # B: internal
+        )
+        # Should match left sides: 2/min(2,2) = 1.0
+        assert result == pytest.approx(1.0)
+
+    def test_edge_gene_not_penalised_for_missing_context(self):
+        """Edge gene with full right match should not be penalised for absent left."""
+        # Reproduce the plan's example: A is at left edge, B is internal with extra left neighbor
+        # A right:  [OG_ANCHOR1=1, OG_ANCHOR2=2]  (only right context)
+        # B left:   [OG_EXTRA=0, OG_ANCHOR1=1]
+        # B right:  [OG_ANCHOR2=2]
+        # Non-directional (merged, max denom): 2 matches out of max(2, 3) = 0.67
+        # Directional (right vs right):  matches([2], [2]) / min(2, 1) = 1/1 = 1.0
+        # BUT B has only 1 right neighbor, so min(2,1)=1; matches=1 (OG_ANCHOR2) → 1.0
+        result = calculate_directional_synteny_ratio(
+            [], [1, 2],          # A: left_edge, right=[anchor1, anchor2]
+            [0, 1], [2],         # B: internal, left=[extra, anchor1], right=[anchor2]
+            True, False,         # A: left_edge
+            False, False,        # B: internal
+        )
+        # Compare right only: A_right=[1,2], B_right=[2] → match=1, denom=min(2,1)=1 → 1.0
+        assert result == pytest.approx(1.0)
+
+    def test_both_edge_same_side_uses_that_side(self):
+        """Both genes are left-edge: compare right sides."""
+        result = calculate_directional_synteny_ratio(
+            [], [1, 2],          # A: left_edge, right=[1,2]
+            [], [1, 2],          # B: left_edge, right=[1,2]
+            True, False,
+            True, False,
+        )
+        # use_left = !True && !True = False
+        # use_right = !False && !False = True → compare right sides
+        # 2/min(2,2) = 1.0
+        assert result == pytest.approx(1.0)
+
+    def test_both_edges_no_comparable_side_uses_fallback(self):
+        """A is left-edge, B is right-edge: no comparable side → fallback to merged min-denom."""
+        result = calculate_directional_synteny_ratio(
+            [], [1, 2],          # A: left_edge, right=[1,2]
+            [1, 2], [],          # B: right_edge, left=[1,2]
+            True, False,         # A: left_edge_a
+            False, True,         # B: right_edge_b
+        )
+        # use_left = !True && !False = False
+        # use_right = !False && !True = False
+        # Fallback: merge A=[1,2], B=[1,2], min(2,2)=2, matches=2 → 1.0
+        assert result == pytest.approx(1.0)
+
+    def test_empty_windows_return_zero(self):
+        """All-empty windows return 0."""
+        result = calculate_directional_synteny_ratio(
+            [], [], [], [], True, True, True, True,
+        )
+        assert result == pytest.approx(0.0)
+
+    def test_near_edge_gene_partial_right(self):
+        """Gene 1 step from right edge: right side has 1 gene, left side has up to half_win."""
+        # A: 1 step from right edge, so A_right=[anchor], A_left=[a1, a2]
+        # B: internal, B_right=[anchor, x], B_left=[a1, a2]
+        result = calculate_directional_synteny_ratio(
+            [5, 6], [7],         # A: left=[a1=5,a2=6], right=[anchor=7]
+            [5, 6], [7, 8],      # B: left=[a1,a2], right=[anchor,x=8]
+            False, False,        # A: fully internal (right is just shorter, not right_edge)
+            False, False,        # B: internal
+        )
+        # Both internal → merged windows: A=[5,6,7], B=[5,6,7,8]
+        # matches=3, denom=max(3,4)=4 → 0.75
+        expected = calculate_synteny_ratio(
+            np.array([5, 6, 7], dtype=np.int32),
+            np.array([5, 6, 7, 8], dtype=np.int32),
+        )
+        assert result == pytest.approx(expected)
+
+
+class TestDirectionalWindowIntegrationWithEngine:
+    """Integration tests verifying that the engine uses directional windows correctly."""
+
+    def test_right_edge_gene_matches_left_only(self, gene_factory, genome_factory, og_factory):
+        """Gene at right contig edge is correctly matched using only left context.
+
+        Layout:
+            Genome A: [A_n2] [A_n1] [A_focal]   (A_focal at right edge)
+            Genome B: [B_n2] [B_n1] [B_focal] [B_extra]  (B_focal internal)
+
+        A_n1 and B_n1 share OG_ANCHOR1; A_n2 and B_n2 share OG_ANCHOR2.
+        B_extra is in OG_EXTRA (not in A). Without directional logic, B_focal's
+        right neighbor inflates its window size and can reduce the ratio.
+        """
+        genome_a = genome_factory("Genome_A")
+        genome_b = genome_factory("Genome_B")
+
+        og = og_factory("OG_FOCAL")
+        og_a1 = og_factory("OG_ANCHOR1")
+        og_a2 = og_factory("OG_ANCHOR2")
+        og_extra = og_factory("OG_EXTRA")
+
+        # Genome A: right edge gene
+        a_n2 = gene_factory("A_n2", "chr1", 100, 200)
+        a_n1 = gene_factory("A_n1", "chr1", 300, 400)
+        g_a_focal = gene_factory("A_focal", "chr1", 500, 600)
+
+        # Genome B: internal gene
+        b_n2 = gene_factory("B_n2", "chr1", 100, 200)
+        b_n1 = gene_factory("B_n1", "chr1", 300, 400)
+        g_b_focal = gene_factory("B_focal", "chr1", 500, 600)
+        b_extra = gene_factory("B_extra", "chr1", 700, 800)
+
+        for g in [a_n2, a_n1, g_a_focal]:
+            genome_a.add_gene(g)
+        for g in [b_n2, b_n1, g_b_focal, b_extra]:
+            genome_b.add_gene(g)
+
+        og.add_gene(g_a_focal)
+        og.add_gene(g_b_focal)
+        og_a1.add_gene(a_n1)
+        og_a1.add_gene(b_n1)
+        og_a2.add_gene(a_n2)
+        og_a2.add_gene(b_n2)
+        og_extra.add_gene(b_extra)
+
+        genomes = [genome_a, genome_b]
+        orthogroups = [og, og_a1, og_a2, og_extra]
+        engine = get_synteny_engine(genomes, orthogroups)
+
+        # With window_size=4 (half_win=2): A has 2 left, B has 2 left + 1 right.
+        # Directional: compare left sides only (A is right-edge) → ratio = 1.0 → passes.
+        result = engine.refine(0, window_size=4, ratio_threshold=0.6)
+        assert len(result) == 1, "Right-edge gene should match its internal partner"
+        sog_genes = [genomes[gi][gene_i] for gi, gene_i in result[0]]
         assert g_a_focal in sog_genes
         assert g_b_focal in sog_genes
 

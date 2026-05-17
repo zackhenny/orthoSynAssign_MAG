@@ -1,6 +1,317 @@
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+// ---------------------------------------------------------------------------
+// Directional window helpers
+// ---------------------------------------------------------------------------
+
+/// Split version of `get_window`: returns separate `(left_indices, right_indices)` instead of
+/// a merged list.  The scan logic is identical to `get_window_linear` /
+/// `get_window_circular`; the only difference is that the two halves are kept apart so callers
+/// can reason about which side of a gene was truncated by a contig edge.
+pub fn get_window_split<F>(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    window_size: usize,
+    is_circular: bool,
+    og_is_valid: F,
+) -> (Vec<usize>, Vec<usize>)
+where
+    F: Fn(usize) -> bool,
+{
+    if is_circular {
+        get_window_split_circular(seqid_vec, gene_idx, window_size, og_is_valid)
+    } else {
+        get_window_split_linear(seqid_vec, gene_idx, window_size, og_is_valid)
+    }
+}
+
+fn get_window_split_linear<F>(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    window_size: usize,
+    og_is_valid: F,
+) -> (Vec<usize>, Vec<usize>)
+where
+    F: Fn(usize) -> bool,
+{
+    let half_win = window_size / 2;
+    let focal_seqid = seqid_vec[gene_idx];
+
+    // Left: up to half_win valid genes before gene_idx on the same contig.
+    let mut left_indices = Vec::with_capacity(half_win);
+    let (mut i, mut left_count) = (gene_idx, 0);
+    while i > 0 && left_count < half_win {
+        i -= 1;
+        if seqid_vec[i] == focal_seqid && og_is_valid(i) {
+            left_indices.push(i);
+            left_count += 1;
+        }
+    }
+    left_indices.reverse(); // restore ascending order
+
+    // Right: up to half_win valid genes after gene_idx on the same contig.
+    let mut right_indices = Vec::with_capacity(half_win);
+    let (mut j, mut right_count) = (gene_idx, 0);
+    while j < seqid_vec.len() - 1 && right_count < half_win {
+        j += 1;
+        if seqid_vec[j] == focal_seqid && og_is_valid(j) {
+            right_indices.push(j);
+            right_count += 1;
+        }
+    }
+
+    (left_indices, right_indices)
+}
+
+fn get_window_split_circular<F>(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    window_size: usize,
+    og_is_valid: F,
+) -> (Vec<usize>, Vec<usize>)
+where
+    F: Fn(usize) -> bool,
+{
+    let half_win = window_size / 2;
+    let focal_seqid = seqid_vec[gene_idx];
+    let n_genes = seqid_vec.len();
+    if n_genes == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let max_neighbors = std::cmp::min(window_size, n_genes - 1);
+
+    // Left (counter-clockwise).
+    let mut left_indices = Vec::with_capacity(half_win);
+    let (mut i, mut left_count) = (gene_idx, 0);
+    for _ in 0..n_genes {
+        if left_count >= half_win {
+            break;
+        }
+        i = (i + n_genes - 1) % n_genes;
+        if i == gene_idx {
+            break;
+        }
+        if seqid_vec[i] == focal_seqid && og_is_valid(i) {
+            left_indices.push(i);
+            left_count += 1;
+        }
+    }
+    left_indices.reverse();
+
+    // Right (clockwise).
+    let r_limit = std::cmp::min(half_win, max_neighbors - left_count);
+    let mut right_indices = Vec::with_capacity(r_limit);
+    let (mut j, mut right_count) = (gene_idx, 0);
+    for _ in 0..n_genes {
+        if right_count >= r_limit {
+            break;
+        }
+        j = (j + 1) % n_genes;
+        if j == gene_idx {
+            break;
+        }
+        if seqid_vec[j] == focal_seqid && og_is_valid(j) {
+            right_indices.push(j);
+            right_count += 1;
+        }
+    }
+
+    (left_indices, right_indices)
+}
+
+/// Split version of `count_raw_contig_neighbors`: returns `(left_raw, right_raw)` so the caller
+/// can determine which specific side of a gene is truncated by a contig boundary.
+pub fn count_raw_contig_neighbors_split(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+    is_circular: bool,
+) -> (usize, usize) {
+    if half_win == 0 {
+        return (0, 0);
+    }
+    if is_circular {
+        count_raw_contig_neighbors_split_circular(seqid_vec, gene_idx, half_win)
+    } else {
+        count_raw_contig_neighbors_split_linear(seqid_vec, gene_idx, half_win)
+    }
+}
+
+fn count_raw_contig_neighbors_split_linear(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+) -> (usize, usize) {
+    let focal_seqid = seqid_vec[gene_idx];
+    let n = seqid_vec.len();
+
+    let mut left = 0usize;
+    let mut i = gene_idx;
+    while i > 0 && left < half_win {
+        i -= 1;
+        if seqid_vec[i] == focal_seqid {
+            left += 1;
+        }
+    }
+
+    let mut right = 0usize;
+    let mut j = gene_idx;
+    while j + 1 < n && right < half_win {
+        j += 1;
+        if seqid_vec[j] == focal_seqid {
+            right += 1;
+        }
+    }
+
+    (left, right)
+}
+
+fn count_raw_contig_neighbors_split_circular(
+    seqid_vec: &[i16],
+    gene_idx: usize,
+    half_win: usize,
+) -> (usize, usize) {
+    let focal_seqid = seqid_vec[gene_idx];
+    let n = seqid_vec.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let max_neighbors = n - 1;
+
+    let mut left = 0usize;
+    let mut i = gene_idx;
+    for _ in 0..n {
+        if left >= half_win {
+            break;
+        }
+        i = (i + n - 1) % n;
+        if i == gene_idx {
+            break;
+        }
+        if seqid_vec[i] == focal_seqid {
+            left += 1;
+        }
+    }
+
+    let r_limit = half_win.min(max_neighbors - left);
+    let mut right = 0usize;
+    let mut j = gene_idx;
+    for _ in 0..n {
+        if right >= r_limit {
+            break;
+        }
+        j = (j + 1) % n;
+        if j == gene_idx {
+            break;
+        }
+        if seqid_vec[j] == focal_seqid {
+            right += 1;
+        }
+    }
+
+    (left, right)
+}
+
+/// Count 1-to-1 matches between two **sorted** slices using a two-pointer walk.
+/// Duplicate values are matched one-for-one (same as `calculate_synteny_ratio`).
+pub fn count_sorted_intersection(a: &[i32], b: &[i32]) -> usize {
+    let mut count = 0;
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            count += 1;
+            i += 1;
+            j += 1;
+        } else if a[i] < b[j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    count
+}
+
+/// Merge two sorted (possibly containing duplicates) slices into a single sorted `Vec`.
+fn sorted_merge(a: &[i32], b: &[i32]) -> Vec<i32> {
+    let mut result = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] <= b[j] {
+            result.push(a[i]);
+            i += 1;
+        } else {
+            result.push(b[j]);
+            j += 1;
+        }
+    }
+    result.extend_from_slice(&a[i..]);
+    result.extend_from_slice(&b[j..]);
+    result
+}
+
+/// Directional synteny ratio between genes A and B.
+///
+/// Rules:
+/// * **Both internal** (no edge flags on either gene): fall back to the original
+///   merged-window comparison with *max* denominator, preserving existing behaviour.
+/// * **Fallback** (no comparable sides remain after applying edge exclusions):
+///   merge whatever context is available and use *min* denominator.
+/// * **Otherwise**: for each side (left / right), compare that side only when
+///   *neither* gene is missing context on that side.  Per-side denominator is
+///   `min(|a_side|, |b_side|)`.  Overall ratio = `total_matches / total_denom`.
+///
+/// This ensures that an edge gene is never penalised for context it structurally
+/// cannot have: it is compared only on the side(s) it actually has.
+pub fn calculate_directional_synteny_ratio(
+    left_a: &[i32],
+    right_a: &[i32],
+    left_b: &[i32],
+    right_b: &[i32],
+    left_edge_a: bool,
+    right_edge_a: bool,
+    left_edge_b: bool,
+    right_edge_b: bool,
+) -> f64 {
+    // Both genes are fully internal — preserve original max-denominator behaviour.
+    if !left_edge_a && !right_edge_a && !left_edge_b && !right_edge_b {
+        let all_a = sorted_merge(left_a, right_a);
+        let all_b = sorted_merge(left_b, right_b);
+        return calculate_synteny_ratio(&all_a, &all_b, false);
+    }
+
+    // A side is "comparable" when neither gene is missing context on that side.
+    let use_left = !left_edge_a && !left_edge_b;
+    let use_right = !right_edge_a && !right_edge_b;
+
+    // Fallback: opposing or double-edge situation — compare all available context
+    // with min denominator (avoids penalising either gene for missing data).
+    if !use_left && !use_right {
+        let all_a = sorted_merge(left_a, right_a);
+        let all_b = sorted_merge(left_b, right_b);
+        return calculate_synteny_ratio(&all_a, &all_b, true);
+    }
+
+    let mut total_matches = 0usize;
+    let mut total_denom = 0usize;
+
+    if use_left {
+        total_matches += count_sorted_intersection(left_a, left_b);
+        total_denom += left_a.len().min(left_b.len());
+    }
+
+    if use_right {
+        total_matches += count_sorted_intersection(right_a, right_b);
+        total_denom += right_a.len().min(right_b.len());
+    }
+
+    if total_denom == 0 {
+        return 0.0;
+    }
+
+    total_matches as f64 / total_denom as f64
+}
+
 pub fn get_orthogroups_vec(num_orthogroups: usize, ogs: &[Vec<i32>]) -> Vec<Vec<(usize, usize)>> {
     let mut orthogroups: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_orthogroups];
     for (genome_idx, og_vec) in ogs.iter().enumerate() {
@@ -157,104 +468,6 @@ pub fn calculate_synteny_ratio(win_a: &[i32], win_b: &[i32], edge_adjusted: bool
     matches as f64 / denom as f64
 }
 
-/// Count the number of genes on the same contig as `gene_idx` within `half_win`
-/// steps on each side, **without** any OG-validity filter.
-///
-/// This mirrors the scan pattern of `get_window_linear` / `get_window_circular`
-/// but counts all same-seqid neighbours regardless of OG assignment.  The
-/// result is compared against `2 * half_win` to determine whether a gene sits
-/// at a contig edge (result < 2 * half_win) and therefore has a structurally
-/// truncated synteny window.
-pub fn count_raw_contig_neighbors(
-    seqid_vec: &[i16],
-    gene_idx: usize,
-    half_win: usize,
-    is_circular: bool,
-) -> usize {
-    if half_win == 0 {
-        return 0;
-    }
-    if is_circular {
-        count_raw_contig_neighbors_circular(seqid_vec, gene_idx, half_win)
-    } else {
-        count_raw_contig_neighbors_linear(seqid_vec, gene_idx, half_win)
-    }
-}
-
-fn count_raw_contig_neighbors_linear(
-    seqid_vec: &[i16],
-    gene_idx: usize,
-    half_win: usize,
-) -> usize {
-    let focal_seqid = seqid_vec[gene_idx];
-    let n = seqid_vec.len();
-
-    let mut left = 0usize;
-    let mut i = gene_idx;
-    while i > 0 && left < half_win {
-        i -= 1;
-        if seqid_vec[i] == focal_seqid {
-            left += 1;
-        }
-    }
-
-    let mut right = 0usize;
-    let mut j = gene_idx;
-    while j + 1 < n && right < half_win {
-        j += 1;
-        if seqid_vec[j] == focal_seqid {
-            right += 1;
-        }
-    }
-
-    left + right
-}
-
-fn count_raw_contig_neighbors_circular(
-    seqid_vec: &[i16],
-    gene_idx: usize,
-    half_win: usize,
-) -> usize {
-    let focal_seqid = seqid_vec[gene_idx];
-    let n = seqid_vec.len();
-    if n == 0 {
-        return 0;
-    }
-    let max_neighbors = n - 1;
-
-    let mut left = 0usize;
-    let mut i = gene_idx;
-    for _ in 0..n {
-        if left >= half_win {
-            break;
-        }
-        i = (i + n - 1) % n;
-        if i == gene_idx {
-            break;
-        }
-        if seqid_vec[i] == focal_seqid {
-            left += 1;
-        }
-    }
-
-    let r_limit = half_win.min(max_neighbors - left);
-    let mut right = 0usize;
-    let mut j = gene_idx;
-    for _ in 0..n {
-        if right >= r_limit {
-            break;
-        }
-        j = (j + 1) % n;
-        if j == gene_idx {
-            break;
-        }
-        if seqid_vec[j] == focal_seqid {
-            right += 1;
-        }
-    }
-
-    left + right
-}
 
 pub fn cluster_genes(
     pairs: Vec<((usize, usize), (usize, usize))>,
