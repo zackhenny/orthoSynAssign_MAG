@@ -35,7 +35,7 @@ pub fn get_window_py(
 pub fn calculate_synteny_ratio_py(mut win_a: Vec<i32>, mut win_b: Vec<i32>) -> PyResult<f64> {
     win_a.sort_unstable();
     win_b.sort_unstable();
-    Ok(calculate_synteny_ratio(&win_a, &win_b))
+    Ok(calculate_synteny_ratio(&win_a, &win_b, false))
 }
 
 #[pymodule]

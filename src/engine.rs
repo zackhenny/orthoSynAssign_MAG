@@ -123,10 +123,16 @@ impl SyntenyEngine {
         ratio_threshold: f64,
     ) -> Vec<((usize, usize), (usize, usize))> {
         let shared_ogs = &self.shared_og_matrix[p_idx][s_idx];
+        let half_win = window_size / 2;
+        let full_win = 2 * half_win;
         let mut idx_buffer = Vec::with_capacity(window_size);
         let mut p_win_buffer = Vec::with_capacity(window_size);
         let mut refined_pairs = Vec::new();
 
+        // Build secondary data: (gene_idx, sorted_og_window, is_contig_edge).
+        // is_contig_edge is true when the gene's raw same-seqid neighbour count
+        // is below the full window capacity, indicating a structurally truncated
+        // window caused by a contig boundary.
         let mut secondary_data = Vec::with_capacity(secondary_genes.len());
         for &s_gene_idx in secondary_genes {
             get_window(
@@ -140,7 +146,14 @@ impl SyntenyEngine {
             let mut win_ogs: Vec<i32> =
                 idx_buffer.iter().map(|&i| self.ogs_vec[s_idx][i]).collect();
             win_ogs.sort_unstable();
-            secondary_data.push((s_gene_idx, win_ogs));
+            let raw_s = count_raw_contig_neighbors(
+                &self.seqids_vec[s_idx],
+                s_gene_idx,
+                half_win,
+                self.circular_genome_vec[s_idx],
+            );
+            let is_edge_s = full_win > 0 && raw_s < full_win;
+            secondary_data.push((s_gene_idx, win_ogs, is_edge_s));
         }
 
         for &p_gene_idx in primary_genes {
@@ -160,12 +173,22 @@ impl SyntenyEngine {
             p_win_buffer.extend(idx_buffer.iter().map(|&i| self.ogs_vec[p_idx][i]));
             p_win_buffer.sort_unstable();
 
+            let raw_p = count_raw_contig_neighbors(
+                &self.seqids_vec[p_idx],
+                p_gene_idx,
+                half_win,
+                self.circular_genome_vec[p_idx],
+            );
+            let is_edge_p = full_win > 0 && raw_p < full_win;
+
             let mut best_candidate = None;
             let mut max_r = -1.0;
 
-            for (s_gene_idx, s_ogs) in &secondary_data {
-                // Call function to calculate the ratio
-                let ratio = calculate_synteny_ratio(&p_win_buffer, s_ogs);
+            for (s_gene_idx, s_ogs, is_edge_s) in &secondary_data {
+                // Use min-denominator when either gene is at a contig edge:
+                // the missing context is absent data, not absent synteny.
+                let edge_adjusted = is_edge_p || *is_edge_s;
+                let ratio = calculate_synteny_ratio(&p_win_buffer, s_ogs, edge_adjusted);
                 if ratio >= ratio_threshold - 1e-9 && ratio > max_r + 1e-9 {
                     max_r = ratio;
                     best_candidate = Some(*s_gene_idx);
