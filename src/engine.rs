@@ -124,71 +124,93 @@ impl SyntenyEngine {
     ) -> Vec<((usize, usize), (usize, usize))> {
         let shared_ogs = &self.shared_og_matrix[p_idx][s_idx];
         let half_win = window_size / 2;
-        let full_win = 2 * half_win;
-        let mut idx_buffer = Vec::with_capacity(window_size);
         let mut p_win_buffer = Vec::with_capacity(window_size);
         let mut refined_pairs = Vec::new();
 
-        // Build secondary data: (gene_idx, sorted_og_window, is_contig_edge).
-        // is_contig_edge is true when the gene's raw same-seqid neighbour count
-        // is below the full window capacity, indicating a structurally truncated
-        // window caused by a contig boundary.
-        let mut secondary_data = Vec::with_capacity(secondary_genes.len());
+        // Build secondary data: per-gene split windows and directional edge flags.
+        //
+        // Each entry: (gene_idx, left_ogs, right_ogs, left_edge, right_edge)
+        //   left_edge  = true when the gene is structurally missing left  context
+        //   right_edge = true when the gene is structurally missing right context
+        let mut secondary_data: Vec<(usize, Vec<i32>, Vec<i32>, bool, bool)> =
+            Vec::with_capacity(secondary_genes.len());
+
         for &s_gene_idx in secondary_genes {
-            get_window(
+            let (left_idx, right_idx) = get_window_split(
                 &self.seqids_vec[s_idx],
                 s_gene_idx,
                 window_size,
                 self.circular_genome_vec[s_idx],
                 |idx: usize| shared_ogs.binary_search(&self.ogs_vec[s_idx][idx]).is_ok(),
-                &mut idx_buffer,
             );
-            let mut win_ogs: Vec<i32> =
-                idx_buffer.iter().map(|&i| self.ogs_vec[s_idx][i]).collect();
-            win_ogs.sort_unstable();
-            let raw_s = count_raw_contig_neighbors(
+            let mut left_ogs: Vec<i32> =
+                left_idx.iter().map(|&i| self.ogs_vec[s_idx][i]).collect();
+            left_ogs.sort_unstable();
+            let mut right_ogs: Vec<i32> =
+                right_idx.iter().map(|&i| self.ogs_vec[s_idx][i]).collect();
+            right_ogs.sort_unstable();
+
+            let (left_raw_s, right_raw_s) = count_raw_contig_neighbors_split(
                 &self.seqids_vec[s_idx],
                 s_gene_idx,
                 half_win,
                 self.circular_genome_vec[s_idx],
             );
-            let is_edge_s = full_win > 0 && raw_s < full_win;
-            secondary_data.push((s_gene_idx, win_ogs, is_edge_s));
+            let left_edge_s = half_win > 0 && left_raw_s < half_win;
+            let right_edge_s = half_win > 0 && right_raw_s < half_win;
+
+            secondary_data.push((s_gene_idx, left_ogs, right_ogs, left_edge_s, right_edge_s));
         }
 
         for &p_gene_idx in primary_genes {
-            get_window(
+            let (left_p_idx, right_p_idx) = get_window_split(
                 &self.seqids_vec[p_idx],
                 p_gene_idx,
                 window_size,
                 self.circular_genome_vec[p_idx],
                 |idx: usize| shared_ogs.binary_search(&self.ogs_vec[p_idx][idx]).is_ok(),
-                &mut idx_buffer,
             );
-            if idx_buffer.is_empty() {
+
+            // Skip primary gene entirely when it has no context on either side.
+            if left_p_idx.is_empty() && right_p_idx.is_empty() {
                 continue;
             }
 
             p_win_buffer.clear();
-            p_win_buffer.extend(idx_buffer.iter().map(|&i| self.ogs_vec[p_idx][i]));
-            p_win_buffer.sort_unstable();
+            p_win_buffer.extend(left_p_idx.iter().map(|&i| self.ogs_vec[p_idx][i]));
+            let p_right_start = p_win_buffer.len();
+            p_win_buffer.extend(right_p_idx.iter().map(|&i| self.ogs_vec[p_idx][i]));
 
-            let raw_p = count_raw_contig_neighbors(
+            let mut p_left_ogs = p_win_buffer[..p_right_start].to_vec();
+            p_left_ogs.sort_unstable();
+            let mut p_right_ogs = p_win_buffer[p_right_start..].to_vec();
+            p_right_ogs.sort_unstable();
+
+            let (left_raw_p, right_raw_p) = count_raw_contig_neighbors_split(
                 &self.seqids_vec[p_idx],
                 p_gene_idx,
                 half_win,
                 self.circular_genome_vec[p_idx],
             );
-            let is_edge_p = full_win > 0 && raw_p < full_win;
+            let left_edge_p = half_win > 0 && left_raw_p < half_win;
+            let right_edge_p = half_win > 0 && right_raw_p < half_win;
 
             let mut best_candidate = None;
             let mut max_r = -1.0;
 
-            for (s_gene_idx, s_ogs, is_edge_s) in &secondary_data {
-                // Use min-denominator when either gene is at a contig edge:
-                // the missing context is absent data, not absent synteny.
-                let edge_adjusted = is_edge_p || *is_edge_s;
-                let ratio = calculate_synteny_ratio(&p_win_buffer, s_ogs, edge_adjusted);
+            for (s_gene_idx, s_left_ogs, s_right_ogs, left_edge_s, right_edge_s) in
+                &secondary_data
+            {
+                let ratio = calculate_directional_synteny_ratio(
+                    &p_left_ogs,
+                    &p_right_ogs,
+                    s_left_ogs,
+                    s_right_ogs,
+                    left_edge_p,
+                    right_edge_p,
+                    *left_edge_s,
+                    *right_edge_s,
+                );
                 if ratio >= ratio_threshold - 1e-9 && ratio > max_r + 1e-9 {
                     max_r = ratio;
                     best_candidate = Some(*s_gene_idx);

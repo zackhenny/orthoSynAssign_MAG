@@ -40,24 +40,41 @@ _EPSILON = 1e-9
 
 
 def run_calibration(
-    table_path: str | Path,
+    table_path: str | Path | None = None,
     output_dir: str | Path = ".",
     seed: int = 42,
     cv_folds: int = 5,
     high_recall_threshold: float = 0.95,
+    *,
+    dataframe=None,
 ) -> dict:
     """Fit a calibrated logistic regression on interior genes.
 
+    The training data can be supplied either as a file path (*table_path*) **or**
+    as a pre-built ``pandas.DataFrame`` (*dataframe* keyword argument).  When
+    *dataframe* is provided *table_path* is ignored, which enables the inline
+    auto-calibration path in :mod:`orthosynassign.refine` without writing an
+    intermediate CSV file.
+
     Args:
-        table_path: Path to ``sog_gene_edge_long.csv``.
+        table_path: Path to ``sog_gene_edge_long.csv``.  May be ``None`` when
+            *dataframe* is supplied.
         output_dir: Directory for ``calibration.json`` and plots.
         seed: Random seed.
         cv_folds: Number of cross-validation folds (genome-stratified).
         high_recall_threshold: Minimum recall for the second threshold.
+        dataframe: Optional pre-built ``pandas.DataFrame`` with the same schema
+            as ``sog_gene_edge_long.csv``.  When supplied, *table_path* is not
+            read.
 
     Returns:
         Dict with keys ``coefficients``, ``intercept``, ``feature_names``,
         ``threshold_f1``, ``threshold_recall``, ``auc_roc``, ``auc_pr``.
+
+    Raises:
+        ValueError: If neither *table_path* nor *dataframe* is provided, or if
+            no positive examples are found.
+        FileNotFoundError: If *table_path* is given but does not exist.
     """
     try:
         import matplotlib
@@ -80,12 +97,18 @@ def run_calibration(
             "Install with: pip install 'orthosynassign[stats]'"
         ) from exc
 
-    table_path = Path(table_path)
+    table_path = Path(table_path) if table_path is not None else None
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading training table from %s", table_path)
-    df = pd.read_csv(table_path)
+    if dataframe is not None:
+        df = dataframe
+        logger.info("Using in-memory training table (%d rows)", len(df))
+    elif table_path is not None:
+        logger.info("Loading training table from %s", table_path)
+        df = pd.read_csv(table_path)
+    else:
+        raise ValueError("Either 'table_path' or 'dataframe' must be provided.")
 
     internal = df[df["edge_type"] == "internal"].copy()
     if internal.empty:
