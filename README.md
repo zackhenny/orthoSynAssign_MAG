@@ -18,38 +18,72 @@
 
 ## Fork Changes
 
-This fork (`orthoSynAssign_MAG`) extends the original `orthoSynAssign` tool with two sets of
-additions aimed at large-scale and MAG (Metagenome-Assembled Genome) analyses, where fragmented
-contigs and assembly incompleteness make the fixed `-r` heuristic less reliable and raw Python
-throughput a bottleneck.
+This fork (`orthoSynAssign_MAG`) extends the original `orthoSynAssign` tool with additions aimed
+at large-scale and MAG (Metagenome-Assembled Genome) analyses, where fragmented contigs and
+assembly incompleteness make the fixed `-r` heuristic less reliable and raw Python throughput a
+bottleneck.
 
-### 1. Statistical modelling pipeline (`orthosynassign.stats`)
+### Original vs. Fork at a Glance
+
+| Feature | Original (`stajichlab/orthoSynAssign`) | This fork (`orthoSynAssign_MAG`) |
+|---------|----------------------------------------|----------------------------------|
+| Synteny refinement | ✅ | ✅ |
+| Visualization (`orthosynassign-vis`) | ✅ | ✅ |
+| Flank-score computation | Python | **Rust + Rayon** (parallel) |
+| Split-gene classification | Fixed `-r` ratio threshold | **Calibrated logistic regression** |
+| MAG / fragmented-contig support | Limited | **Edge-gene scoring + rescue flags** |
+| Statistical validation pipeline | ❌ | **Permutation test, CV, mixed-effects** |
+| Genome completeness weighting | ❌ | **`--genome_completeness` (CheckM2-compatible)** |
+| Additional CLI entry points | — | `orthosynassign-score` |
+| Additional Python sub-package | — | `orthosynassign.stats` |
+
+### 1. Statistical Modelling Pipeline (`orthosynassign.stats`)
 
 **What was added:** A complete data-driven calibration pipeline that replaces the fixed `-r`
 synteny-ratio heuristic with a logistic regression model trained on interior genes with known
-split status. The pipeline consists of five sequential steps:
+split status. The pipeline consists of six sequential steps:
 
-1. `orthosynassign-score` – exports a per-gene flank-score training table.
-2. `orthosynassign.stats.permutation` – permutation test confirming that the HOG-neighbourhood
-   signal is non-random.
-3. `orthosynassign.stats.calibrate` – logistic regression calibration; outputs model coefficients
-   and operating thresholds.
-4. `orthosynassign.stats.cv` – stratified k-fold cross-validation with ROC/PR curve diagnostics.
-5. `orthosynassign.stats.mixed_effects` – mixed-effects logistic regression (via R/lme4) that
-   accounts for per-genome random intercepts.
-6. `orthosynassign.stats.apply_model` – scores edge genes and adds `split_probability`,
-   `split_confidence`, and `rescue_flag` columns to the output table.
+1. `orthosynassign-score` – exports a per-gene flank-score training table with edge-type labels
+   and optional genome-completeness weighting.
+2. `orthosynassign.stats.permutation` – permutation test (Mann–Whitney U, `scipy.stats`) that
+   confirms the HOG-neighbourhood signal is non-random before fitting any model.
+3. `orthosynassign.stats.calibrate` – fits a
+   [`sklearn.linear_model.LogisticRegressionCV`](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.LogisticRegressionCV.html)
+   on interior genes; outputs model coefficients and two operating thresholds (F1-maximising and
+   high-recall ≥ 0.95).
+4. `orthosynassign.stats.cv` – genome-stratified k-fold cross-validation
+   ([`sklearn.model_selection.GroupKFold`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GroupKFold.html))
+   with ROC/PR curve diagnostics and per-fold AUC reporting.
+5. `orthosynassign.stats.mixed_effects` – mixed-effects logistic regression via **R / lme4**
+   that accounts for per-genome random intercepts (requires R ≥ 4.0 and the `lme4` package).
+6. `orthosynassign.stats.apply_model` – applies the calibrated model to true edge genes and
+   adds `split_probability`, `split_confidence`, and `rescue_flag` columns to the output table.
+
+**Models used:**
+
+| Step | Model / Test | Library |
+|------|-------------|---------|
+| Permutation test | Mann–Whitney U test | `scipy.stats` |
+| Calibration | `LogisticRegressionCV` (L2, genome-stratified CV) | `scikit-learn` |
+| Cross-validation | `GroupKFold` + logistic regression | `scikit-learn` |
+| Mixed-effects | `glmer` (binary logit, genome random intercept) | R `lme4` |
+| Score application | Logistic sigmoid on calibrated coefficients | `numpy` |
 
 **Why:** MAG datasets often contain many fragmented, edge-located genes for which the simple
 ratio threshold is too coarse. Replacing it with a calibrated probability model improves
 precision on fragmentary assemblies and provides a principled FPR-controlled operating point.
 
-### 2. Rust `FlankEngine` with Rayon parallelism
+### 2. Rust `FlankEngine` with Rayon Parallelism
 
-**What was added:** The flank-score computation (`build_shared_matrix` and `refine_logic`) was
-migrated from Python to a new Rust module (`src/flank.rs`) that uses
-[Rayon](https://github.com/rayon-rs/rayon) for data-parallel processing. The Python layer now
-calls the compiled Rust extension via PyO3.
+**What was added:** The flank-score computation was migrated from Python to a new Rust module
+(`src/flank.rs`) that uses [Rayon](https://github.com/rayon-rs/rayon) for data-parallel
+processing. The Python layer calls the compiled Rust extension via
+[PyO3](https://pyo3.rs/). The engine:
+
+- Builds per-genome contig-position maps in a single linear pass.
+- Computes HOG-neighbourhood Jaccard flank scores in parallel across all genes and genomes.
+- Reports per-gene `edge_type` (internal / left_edge / right_edge / both_edge) and
+  `flank_completeness` (fraction of window slots that are on-contig — a key MAG quality signal).
 
 **Why:** MAG studies routinely involve hundreds of genomes, making the all-vs-all flank matrix
 computationally expensive in pure Python. The Rust/Rayon implementation reduces wall-clock time
@@ -169,6 +203,28 @@ colors; genes with orthologs in other genomes located outside the given window a
 The `orthosynassign-score` command and the `orthosynassign.stats` sub-package
 provide a data-driven calibration pipeline that replaces the fixed `-r` heuristic
 with a logistic regression model trained on interior genes with known split status.
+This pipeline is particularly valuable for **MAG datasets** where assembly
+fragmentation makes the simple ratio threshold unreliable.
+
+### `orthosynassign-score` reference
+
+```
+Required arguments:
+  --og_file OG_FILE     Path to OrthoFinder Orthogroups.tsv file
+  --hog_file HOG_FILE   Path to OrthoFinder N0.tsv (HOG table)
+  --sog_file SOG_FILE   Path to Refined_SOGs.tsv from orthosynassign
+  --bed file [files ...]
+                        BED genome annotation files
+
+Options:
+  -w, --window WINDOW   Half-window size for flank HOG extraction (default: 4)
+  --genome_completeness PATH
+                        Two-column TSV (genome_name, completeness) e.g. from CheckM2
+  -o, --output OUTPUT   Output CSV file path (default: sog_gene_edge_long.csv)
+  -v, --verbose         Enable verbose logging
+  -V, --version         show program's version number and exit
+  -h, --help            show this help message and exit
+```
 
 ### Recommended Execution Sequence
 
@@ -185,7 +241,28 @@ orthosynassign-score \
 ```
 
 This produces `sog_gene_edge_long.csv` with per-gene flank scores and
-ground-truth split labels for interior genes.
+ground-truth split labels for interior genes.  Each row contains:
+`gene_id`, `genome`, `og_id`, `og_size`, `genome_completeness`,
+`flank_score`, `flank_left_hogs`, `flank_right_hogs`, `edge_type`,
+`sog_id`, `is_split`.
+
+**Optional: supply genome completeness estimates** (e.g. from
+[CheckM2](https://github.com/chklovski/CheckM2)) to weight the model
+training by assembly quality:
+
+```bash
+orthosynassign-score \
+    --og_file orthogroups.tsv \
+    --hog_file N0.tsv \
+    --sog_file Refined_SOGs.tsv \
+    --bed *.bed \
+    -w 4 \
+    --genome_completeness completeness.tsv \
+    -o sog_gene_edge_long.csv
+```
+
+`completeness.tsv` is a two-column tab-separated file (no header) with
+genome name in column 1 and a completeness fraction (0–1) in column 2.
 
 #### 2. Permutation test (confirm HOG signal is non-random)
 
@@ -246,7 +323,16 @@ python -m orthosynassign.stats.apply_model \
 ```
 
 Adds `split_probability`, `split_confidence`, and `rescue_flag` columns to the
-edge-gene table.
+edge-gene table.  Use `--threshold_type recall` to select the high-recall
+(≥ 0.95 recall) threshold instead of the F1-maximising one.
+
+### Output Column Reference
+
+| Column | Description |
+|--------|-------------|
+| `split_probability` | Predicted probability that the SOG assignment is an artifact split (0–1). |
+| `split_confidence` | `1 − split_probability`; higher = more reliable assignment. |
+| `rescue_flag` | 1 when `split_probability < threshold` — gene is a rescue candidate. |
 
 ## Requirements
 
