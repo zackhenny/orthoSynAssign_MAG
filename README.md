@@ -363,6 +363,31 @@ for R installation instructions.
 
 ## Install
 
+### Prerequisites
+
+- **Python** >= 3.9, < 3.14
+- **Rust** toolchain (required to compile the Rust/PyO3 extension via [maturin])
+
+Install Rust using [rustup] (the recommended way on all platforms):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# then follow the on-screen instructions and restart your shell
+```
+
+Verify that `rustc` and `cargo` are available:
+
+```bash
+rustc --version
+cargo --version
+```
+
+> **Windows users:** Download and run the installer from <https://rustup.rs>.
+
+[maturin] (the build backend that compiles the Rust extension) is declared as a build
+dependency in `pyproject.toml` and will be installed automatically by `pip` — you do **not**
+need to install it manually.
+
 ### From source
 
 To install **this fork** (with the statistical modelling and Rust FlankEngine additions), clone
@@ -383,6 +408,14 @@ Navigate to the project directory and install the package.
 ```bash
 cd orthoSynAssign_MAG   # or orthoSynAssign for the upstream version
 pip install .
+```
+
+After installation, verify the CLI entry points are available:
+
+```bash
+orthosynassign --version
+orthosynassign-vis --version
+orthosynassign-score --version
 ```
 
 ### For developing
@@ -412,3 +445,5 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 [numpy]: https://numpy.org/
 [pyGenomeViz]: https://github.com/moshi4/pyGenomeViz
 [Rust]: https://rust-lang.org/
+[rustup]: https://rustup.rs/
+[maturin]: https://www.maturin.rs/
